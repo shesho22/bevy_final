@@ -1,0 +1,8 @@
+[package]
+name = "bevy_final"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.17.2"
+bevy_kira_audio = "0.24"

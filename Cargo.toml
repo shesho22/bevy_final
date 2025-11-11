@@ -6,3 +6,4 @@ edition = "2021"
 [dependencies]
 bevy = "0.17.2"
 bevy_kira_audio = "0.24"
+rand = "0.8"

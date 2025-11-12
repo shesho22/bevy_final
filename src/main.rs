@@ -1,4 +1,4 @@
-use bevy::prelude::*;
+use bevy::{app::Animation, prelude::*};
 use bevy_kira_audio::{Audio, AudioControl, AudioPlugin, AudioSource};
 use rand::Rng;
 
@@ -33,6 +33,12 @@ struct Obstacle {
 #[derive(Component)]
 struct ScoreText;
 
+#[derive(Component)]
+struct AnimationTimer(Timer);
+
+#[derive(Component)]
+struct FrameIndex(usize);
+
 // ===================================
 // ===            ESTADOS           ===
 // ===================================
@@ -56,6 +62,21 @@ struct AudioHandles {
 #[derive(Resource, Default)]
 struct Score {
     value: f32,
+}
+
+#[derive(Resource)]
+struct PlayerFrames {
+    frames: Vec<Handle<Image>>,
+}
+
+#[derive(Resource)]
+struct ObstacleGroundFrames {
+    frames: Vec<Handle<Image>>,
+}
+
+#[derive(Resource)]
+struct ObstacleAirFrames {
+    frames: Vec<Handle<Image>>,
 }
 
 #[derive(Resource)]
@@ -86,24 +107,54 @@ fn setup(
     audio_handles.jump = asset_server.load("sounds/jump.ogg");
     audio_handles.game_over = asset_server.load("sounds/game-over.ogg");
 
-    // Cargar sprites de obstáculos
-    let ground_obstacle = asset_server.load("sprites/obstacle-ground.png");
-    let air_obstacle = asset_server.load("sprites/obstacle-air.png");
+    // === FRAMES DEL JUGADOR ===
+    let frames = vec![
+        asset_server.load("sprites/character1.png"),
+        asset_server.load("sprites/character2.png"),
+        asset_server.load("sprites/character3.png"),
+        asset_server.load("sprites/character4.png"),
+    ];
+    commands.insert_resource(PlayerFrames {
+        frames: frames.clone(),
+    });
 
+    // === FRAMES DE OBSTÁCULOS ===
+    let ground_frames = vec![
+        asset_server.load("sprites/obstacle-ground1.png"),
+        asset_server.load("sprites/obstacle-ground2.png"),
+        asset_server.load("sprites/obstacle-ground3.png"),
+    ];
+    let air_frames = vec![
+        asset_server.load("sprites/obstacle-air1.png"),
+        asset_server.load("sprites/obstacle-air2.png"),
+        asset_server.load("sprites/obstacle-air3.png"),
+    ];
+
+    commands.insert_resource(ObstacleGroundFrames {
+        frames: ground_frames.clone(),
+    });
+    commands.insert_resource(ObstacleAirFrames {
+        frames: air_frames.clone(),
+    });
+
+    // Texturas base
+    let ground_obstacle = ground_frames[0].clone();
+    let air_obstacle = air_frames[0].clone();
     commands.insert_resource(ObstacleTextures {
         ground: ground_obstacle.clone(),
         air: air_obstacle.clone(),
     });
 
-    // Jugador
-    let character_texture = asset_server.load("sprites/character.png");
+    // === JUGADOR ===
     commands.spawn((
-        Sprite::from_image(character_texture),
+        Sprite::from_image(frames[0].clone()),
         Transform::from_translation(PLAYER_START_POS).with_scale(Vec3::splat(0.5)),
         Player { velocity: Vec2::ZERO },
+        AnimationTimer(Timer::from_seconds(0.2, TimerMode::Repeating)),
+        FrameIndex(0),
     ));
 
-    // Piso
+    // === PISO ===
     let floor_texture = asset_server.load("sprites/floor.png");
     let num_tiles = 20;
     let tile_width = 64.0;
@@ -125,28 +176,28 @@ fn setup(
         ));
     }
 
-    // Obstáculos iniciales
+    // === OBSTÁCULOS INICIALES ===
     let mut rng = rand::thread_rng();
-
     for i in 0..5 {
         let x = OBSTACLE_START_X + i as f32 * OBSTACLE_SPACING;
         let airborne = rng.gen_bool(0.5);
         let y = if airborne { FLOOR_Y + 90.0 } else { FLOOR_Y + 10.0 };
-
         let texture = if airborne {
-            air_obstacle.clone()
+            air_frames[0].clone()
         } else {
-            ground_obstacle.clone()
+            ground_frames[0].clone()
         };
 
         commands.spawn((
             Sprite::from_image(texture),
             Transform::from_translation(Vec3::new(x, y, 0.0)).with_scale(Vec3::splat(0.7)),
             Obstacle { airborne },
+            AnimationTimer(Timer::from_seconds(0.3, TimerMode::Repeating)),
+            FrameIndex(0),
         ));
     }
 
-    // Texto de puntaje
+    // === TEXTO DE PUNTAJE ===
     commands.spawn((
         Text2d::new("Score: 0"),
         TextFont {
@@ -212,16 +263,15 @@ fn move_obstacles(
     for (mut transform, mut sprite, mut obstacle) in query.iter_mut() {
         transform.translation.x -= OBSTACLE_SPEED * delta;
 
-        // Reposición de obstáculos
+        // Reposición
         if transform.translation.x < OBSTACLE_MIN_X {
             obstacle.airborne = rng.gen_bool(0.5);
             transform.translation.x = OBSTACLE_RESET_X;
             transform.translation.y = if obstacle.airborne {
-                FLOOR_Y + 90.0 // aire
+                FLOOR_Y + 90.0
             } else {
-                FLOOR_Y  + 10.0 // piso 
+                FLOOR_Y + 10.0
             };
-
             sprite.image = if obstacle.airborne {
                 obstacle_textures.air.clone()
             } else {
@@ -258,9 +308,45 @@ fn update_score(
     mut query: Query<&mut Text2d, With<ScoreText>>,
 ) {
     score.value += time.delta().as_secs_f32() * 5.0;
-
     if let Ok(mut text) = query.single_mut() {
         text.0 = format!("Score: {}", score.value.floor() as i32);
+    }
+}
+
+// ===================================
+// ===         SISTEMAS FRAMES      ===
+// ===================================
+fn animate_player_frames(
+    time: Res<Time>,
+    player_frames: Res<PlayerFrames>,
+    mut query: Query<(&mut AnimationTimer, &mut FrameIndex, &mut Sprite), With<Player>>,
+) {
+    for (mut timer, mut frame_index, mut sprite) in &mut query {
+        timer.0.tick(time.delta());
+        if timer.0.just_finished() {
+            frame_index.0 = (frame_index.0 + 1) % player_frames.frames.len();
+            sprite.image = player_frames.frames[frame_index.0].clone();
+        }
+    }
+}
+
+fn animate_obstacle_frames(
+    time: Res<Time>,
+    ground_frames: Res<ObstacleGroundFrames>,
+    air_frames: Res<ObstacleAirFrames>,
+    mut query: Query<(&mut AnimationTimer, &mut FrameIndex, &mut Sprite, &Obstacle)>,
+) {
+    for (mut timer, mut frame_index, mut sprite, obstacle) in &mut query {
+        timer.0.tick(time.delta());
+        if timer.0.just_finished() {
+            let frames = if obstacle.airborne {
+                &air_frames.frames
+            } else {
+                &ground_frames.frames
+            };
+            frame_index.0 = (frame_index.0 + 1) % frames.len();
+            sprite.image = frames[frame_index.0].clone();
+        }
     }
 }
 
@@ -280,5 +366,7 @@ fn main() {
         .add_systems(Update, move_obstacles.run_if(in_state(GameState::Playing)))
         .add_systems(Update, check_collision.run_if(in_state(GameState::Playing)))
         .add_systems(Update, update_score.run_if(in_state(GameState::Playing)))
+        .add_systems(Update, animate_player_frames.run_if(in_state(GameState::Playing)))
+        .add_systems(Update, animate_obstacle_frames.run_if(in_state(GameState::Playing)))
         .run();
 }

@@ -1,4 +1,4 @@
-use bevy::{app::Animation, prelude::*};
+use bevy::prelude::*;
 use bevy_kira_audio::{Audio, AudioControl, AudioPlugin, AudioSource};
 use rand::Rng;
 
@@ -8,6 +8,7 @@ use rand::Rng;
 const PLAYER_START_POS: Vec3 = Vec3::new(-300.0, -60.0, 0.0);
 const FLOOR_Y: f32 = -100.0;
 const PLAYER_HEIGHT: f32 = 50.0;
+
 const OBSTACLE_SPACING: f32 = 220.0;
 const OBSTACLE_START_X: f32 = 400.0;
 const OBSTACLE_MIN_X: f32 = -550.0;
@@ -18,17 +19,19 @@ const OBSTACLE_SPEED: f32 = 220.0;
 // ===          COMPONENTES         ===
 // ===================================
 #[derive(Component)]
-struct Player {
-    velocity: Vec2,
-}
+struct Player;
+
+#[derive(Component)]
+struct Velocity(Vec2); // Velocidad Y (Salto y gravedad)
 
 #[derive(Component)]
 struct Floor;
 
 #[derive(Component)]
-struct Obstacle {
-    airborne: bool,
-}
+struct Obstacle;
+
+#[derive(Component)]
+struct Airborne(bool);
 
 #[derive(Component)]
 struct ScoreText;
@@ -40,18 +43,17 @@ struct AnimationTimer(Timer);
 struct FrameIndex(usize);
 
 // ===================================
-// ===            ESTADOS           ===
+// ===           ESTADOS           ===
 // ===================================
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Default, States)]
 enum GameState {
-    #[default]
-    Menu,
+    #[default] Menu,
     Playing,
     GameOver,
 }
 
 // ===================================
-// ===           RECURSOS           ===
+// ===           RECURSOS          ===
 // ===================================
 #[derive(Resource, Default)]
 struct AudioHandles {
@@ -86,246 +88,256 @@ struct ObstacleTextures {
 }
 
 // ===================================
-// ===         SETUP INICIAL        ===
+// ===      PLUGIN: JUGADOR        ===
 // ===================================
+pub struct PlayerPlugin;
+
+impl Plugin for PlayerPlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Startup, setup)
+           .add_systems(Update, start_game.run_if(in_state(GameState::Menu)))
+           .add_systems(Update, (
+                move_player,
+                animate_player_frames,
+                update_score,
+           ).run_if(in_state(GameState::Playing)));
+    }
+}
+
+// ----------------------------------
+// SETUP GENERAL
+// ----------------------------------
 fn setup(
     mut commands: Commands,
     asset_server: Res<AssetServer>,
     mut audio_handles: ResMut<AudioHandles>,
 ) {
-    // Cámara
-    commands.spawn((Camera2d, Transform::from_scale(Vec3::splat(0.8))));
+    setup_camera_and_background(&mut commands, &asset_server);
+    setup_audio(&mut audio_handles, &asset_server);
+    setup_frame_resources(&mut commands, &asset_server);
+    setup_floor(&mut commands, &asset_server);
+    setup_player(&mut commands, &asset_server);
+    setup_obstacles(&mut commands, &asset_server);
+    setup_score_text(&mut commands);
+}
 
-    // Fondo
-    let background = asset_server.load("backgrounds/background.png");
+fn setup_camera_and_background(commands: &mut Commands, asset_server: &AssetServer) {
+    commands.spawn((Camera2d, Transform::from_scale(Vec3::splat(0.8))));
     commands.spawn((
-        Sprite::from_image(background),
+        Sprite::from_image(asset_server.load("backgrounds/background.png")),
         Transform::from_translation(Vec3::new(0.0, 0.0, -1.0)),
     ));
+}
 
-    // Cargar sonidos
-    audio_handles.jump = asset_server.load("sounds/jump.ogg");
-    audio_handles.game_over = asset_server.load("sounds/game-over.ogg");
+fn setup_audio(audio: &mut AudioHandles, asset_server: &AssetServer) {
+    audio.jump = asset_server.load("sounds/jump.ogg");
+    audio.game_over = asset_server.load("sounds/game-over.ogg");
+}
 
-    // === FRAMES DEL JUGADOR ===
+fn setup_frame_resources(commands: &mut Commands, asset_server: &AssetServer) {
+    // Player frames
     let frames = vec![
         asset_server.load("sprites/character1.png"),
         asset_server.load("sprites/character2.png"),
         asset_server.load("sprites/character3.png"),
         asset_server.load("sprites/character4.png"),
     ];
-    commands.insert_resource(PlayerFrames {
-        frames: frames.clone(),
-    });
+    commands.insert_resource(PlayerFrames { frames: frames.clone() });
 
-    // === FRAMES DE OBSTÁCULOS ===
+    // Obstacle frames
     let ground_frames = vec![
         asset_server.load("sprites/obstacle-ground1.png"),
         asset_server.load("sprites/obstacle-ground2.png"),
         asset_server.load("sprites/obstacle-ground3.png"),
     ];
+
     let air_frames = vec![
         asset_server.load("sprites/obstacle-air1.png"),
         asset_server.load("sprites/obstacle-air2.png"),
         asset_server.load("sprites/obstacle-air3.png"),
     ];
 
-    commands.insert_resource(ObstacleGroundFrames {
-        frames: ground_frames.clone(),
-    });
-    commands.insert_resource(ObstacleAirFrames {
-        frames: air_frames.clone(),
-    });
-
-    // Texturas base
-    let ground_obstacle = ground_frames[0].clone();
-    let air_obstacle = air_frames[0].clone();
+    commands.insert_resource(ObstacleGroundFrames { frames: ground_frames.clone() });
+    commands.insert_resource(ObstacleAirFrames { frames: air_frames.clone() });
     commands.insert_resource(ObstacleTextures {
-        ground: ground_obstacle.clone(),
-        air: air_obstacle.clone(),
+        ground: ground_frames[0].clone(),
+        air: air_frames[0].clone(),
     });
+}
 
-    // === JUGADOR ===
-    commands.spawn((
-        Sprite::from_image(frames[0].clone()),
-        Transform::from_translation(PLAYER_START_POS).with_scale(Vec3::splat(0.5)),
-        Player { velocity: Vec2::ZERO },
-        AnimationTimer(Timer::from_seconds(0.2, TimerMode::Repeating)),
-        FrameIndex(0),
-    ));
-
-    // === PISO ===
+fn setup_floor(commands: &mut Commands, asset_server: &AssetServer) {
     let floor_texture = asset_server.load("sprites/floor.png");
     let num_tiles = 20;
     let tile_width = 64.0;
-    let tile_scale = 1.0;
     let y_offset = -40.0;
 
     for i in 0..num_tiles {
-        let x = (i as f32 * tile_width * tile_scale)
-            - (num_tiles as f32 * tile_width * tile_scale / 2.0);
-
+        let x = (i as f32 * tile_width) - (num_tiles as f32 * tile_width / 2.0);
         commands.spawn((
             Sprite::from_image(floor_texture.clone()),
             Transform {
                 translation: Vec3::new(x, FLOOR_Y + y_offset, 0.0),
-                scale: Vec3::splat(tile_scale),
+                scale: Vec3::splat(1.0),
                 ..default()
             },
             Floor,
         ));
     }
+}
 
-    // === OBSTÁCULOS INICIALES ===
+fn setup_player(commands: &mut Commands,asset_server: &AssetServer) {
+    let character = asset_server.load("sprites/character4.png");
+    commands.spawn((
+        Sprite::from_image(character),
+        Transform::from_translation(PLAYER_START_POS).with_scale(Vec3::splat(0.5)),
+        Player,
+        Velocity(Vec2::ZERO),
+        AnimationTimer(Timer::from_seconds(0.2, TimerMode::Repeating)),
+        FrameIndex(0),
+    ));
+}
+
+fn setup_obstacles(commands: &mut Commands, asset_server: &AssetServer) {
+    let ground = asset_server.load("sprites/obstacle-ground1.png");
+    let air = asset_server.load("sprites/obstacle-air1.png");
     let mut rng = rand::thread_rng();
+
     for i in 0..5 {
         let x = OBSTACLE_START_X + i as f32 * OBSTACLE_SPACING;
-        let airborne = rng.gen_bool(0.5);
-        let y = if airborne { FLOOR_Y + 90.0 } else { FLOOR_Y + 10.0 };
-        let texture = if airborne {
-            air_frames[0].clone()
+        let is_airborne = rng.gen_bool(0.5);
+
+        let (y, texture) = if is_airborne {
+            (FLOOR_Y + 90.0, air.clone())
         } else {
-            ground_frames[0].clone()
+            (FLOOR_Y + 10.0, ground.clone())
         };
 
         commands.spawn((
             Sprite::from_image(texture),
-            Transform::from_translation(Vec3::new(x, y, 0.0)).with_scale(Vec3::splat(0.7)),
-            Obstacle { airborne },
+            Transform::from_translation(Vec3::new(x, y, 0.0))
+                .with_scale(Vec3::splat(0.7)),
+            Obstacle,
+            Airborne(is_airborne),
             AnimationTimer(Timer::from_seconds(0.3, TimerMode::Repeating)),
             FrameIndex(0),
         ));
     }
+}
 
-    // === TEXTO DE PUNTAJE ===
+fn setup_score_text(commands: &mut Commands) {
     commands.spawn((
         Text2d::new("Score: 0"),
-        TextFont {
-            font_size: 30.0,
-            font: default(),
-            ..default()
-        },
+        TextFont { font_size: 30.0, ..default() },
         TextColor(Color::WHITE),
         Transform::from_translation(Vec3::new(-350.0, 200.0, 1.0)),
         ScoreText,
     ));
 }
 
-// ===================================
-// ===         SISTEMAS DE JUEGO    ===
-// ===================================
 fn start_game(
     input: Res<ButtonInput<KeyCode>>,
-    mut next_state: ResMut<NextState<GameState>>,
+    mut next: ResMut<NextState<GameState>>,
 ) {
     if input.any_pressed([KeyCode::ArrowUp, KeyCode::Space, KeyCode::Enter]) {
-        next_state.set(GameState::Playing);
+        next.set(GameState::Playing);
     }
 }
 
+// ----------------------------------
+// SISTEMAS DEL JUGADOR
+// ----------------------------------
 fn move_player(
     input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
     audio: Res<Audio>,
     audio_handles: Res<AudioHandles>,
-    mut query: Query<(&mut Transform, &mut Player), With<Player>>,
+    mut query: Query<(&mut Transform, &mut Velocity), With<Player>>,
 ) {
-    if let Ok((mut transform, mut player)) = query.single_mut() {
+    if let Ok((mut tf, mut vel)) = query.single_mut() {
         let delta = time.delta().as_secs_f32();
         let gravity = if input.pressed(KeyCode::ArrowDown) { -2000.0 } else { -500.0 };
         let jump_speed = 350.0;
 
-        let on_floor = transform.translation.y <= FLOOR_Y + PLAYER_HEIGHT / 2.0 + 0.1;
+        let on_floor = tf.translation.y <= FLOOR_Y + PLAYER_HEIGHT / 2.0 + 0.1;
 
         if input.just_pressed(KeyCode::ArrowUp) && on_floor {
-            player.velocity.y = jump_speed;
+            vel.0.y = jump_speed;
             audio.play(audio_handles.jump.clone());
         }
 
-        player.velocity.y += gravity * delta;
-        transform.translation.y += player.velocity.y * delta;
+        vel.0.y += gravity * delta;
 
-        if transform.translation.y < FLOOR_Y + PLAYER_HEIGHT / 2.0 {
-            transform.translation.y = FLOOR_Y + PLAYER_HEIGHT / 2.0;
-            player.velocity.y = 0.0;
-        }
+        tf.translation.y = (tf.translation.y + vel.0.y * delta)
+            .max(FLOOR_Y + PLAYER_HEIGHT / 2.0);
     }
 }
 
-fn move_obstacles(
+fn animate_player_frames(
     time: Res<Time>,
-    obstacle_textures: Res<ObstacleTextures>,
-    mut query: Query<(&mut Transform, &mut Sprite, &mut Obstacle)>,
+    frames: Res<PlayerFrames>,
+    mut query: Query<(&mut AnimationTimer, &mut FrameIndex, &mut Sprite), With<Player>>,
 ) {
-    let delta = time.delta().as_secs_f32();
-    let mut rng = rand::thread_rng();
-
-    for (mut transform, mut sprite, mut obstacle) in query.iter_mut() {
-        transform.translation.x -= OBSTACLE_SPEED * delta;
-
-        // Reposición
-        if transform.translation.x < OBSTACLE_MIN_X {
-            obstacle.airborne = rng.gen_bool(0.5);
-            transform.translation.x = OBSTACLE_RESET_X;
-            transform.translation.y = if obstacle.airborne {
-                FLOOR_Y + 90.0
-            } else {
-                FLOOR_Y + 10.0
-            };
-            sprite.image = if obstacle.airborne {
-                obstacle_textures.air.clone()
-            } else {
-                obstacle_textures.ground.clone()
-            };
+    for (mut timer, mut index, mut sprite) in &mut query {
+        timer.0.tick(time.delta());
+        if timer.0.just_finished() {
+            index.0 = (index.0 + 1) % frames.frames.len();
+            sprite.image = frames.frames[index.0].clone();
         }
     }
 }
 
-fn check_collision(
-    mut next_state: ResMut<NextState<GameState>>,
-    player_query: Query<&Transform, With<Player>>,
-    obstacle_query: Query<&Transform, With<Obstacle>>,
-    audio: Res<Audio>,
-    audio_handles: Res<AudioHandles>,
-) {
-    if let Ok(player_tf) = player_query.single() {
-        for obstacle_tf in obstacle_query.iter() {
-            let distance = player_tf.translation.distance(obstacle_tf.translation);
-            if distance < 50.0 {
-                audio.play(audio_handles.game_over.clone());
-                next_state.set(GameState::GameOver);
-            }
-        }
-    }
-}
-
-// ===================================
-// ===         SISTEMA PUNTAJE      ===
-// ===================================
 fn update_score(
     time: Res<Time>,
     mut score: ResMut<Score>,
     mut query: Query<&mut Text2d, With<ScoreText>>,
 ) {
     score.value += time.delta().as_secs_f32() * 5.0;
+
     if let Ok(mut text) = query.single_mut() {
         text.0 = format!("Score: {}", score.value.floor() as i32);
     }
 }
 
 // ===================================
-// ===         SISTEMAS FRAMES      ===
+// ===     PLUGIN: OBSTACULOS      ===
 // ===================================
-fn animate_player_frames(
+pub struct ObstaclePlugin;
+
+impl Plugin for ObstaclePlugin {
+    fn build(&self, app: &mut App) {
+        app.add_systems(Update, (
+            move_obstacles,
+            animate_obstacle_frames,
+            check_collision,
+        ).run_if(in_state(GameState::Playing)));
+    }
+}
+
+// ----------------------------------
+// SISTEMAS DE OBSTÁCULOS
+// ----------------------------------
+fn move_obstacles(
     time: Res<Time>,
-    player_frames: Res<PlayerFrames>,
-    mut query: Query<(&mut AnimationTimer, &mut FrameIndex, &mut Sprite), With<Player>>,
+    textures: Res<ObstacleTextures>,
+    mut query: Query<(&mut Transform, &mut Sprite, &mut Airborne), With<Obstacle>>,
 ) {
-    for (mut timer, mut frame_index, mut sprite) in &mut query {
-        timer.0.tick(time.delta());
-        if timer.0.just_finished() {
-            frame_index.0 = (frame_index.0 + 1) % player_frames.frames.len();
-            sprite.image = player_frames.frames[frame_index.0].clone();
+    let delta = time.delta().as_secs_f32();
+    let mut rng = rand::thread_rng();
+
+    for (mut tf, mut sprite, mut airborne_state) in query.iter_mut() {
+        tf.translation.x -= OBSTACLE_SPEED * delta;
+
+        if tf.translation.x < OBSTACLE_MIN_X {
+            airborne_state.0 = rng.gen_bool(0.5);
+
+            tf.translation.x = OBSTACLE_RESET_X;
+            tf.translation.y = if airborne_state.0 { FLOOR_Y + 90.0 } else { FLOOR_Y + 10.0 };
+
+            sprite.image = if airborne_state.0 {
+                textures.air.clone()
+            } else {
+                textures.ground.clone()
+            };
         }
     }
 }
@@ -334,24 +346,41 @@ fn animate_obstacle_frames(
     time: Res<Time>,
     ground_frames: Res<ObstacleGroundFrames>,
     air_frames: Res<ObstacleAirFrames>,
-    mut query: Query<(&mut AnimationTimer, &mut FrameIndex, &mut Sprite, &Obstacle)>,
+    mut query: Query<(&mut AnimationTimer, &mut FrameIndex, &mut Sprite, &Airborne), With<Obstacle>>,
 ) {
-    for (mut timer, mut frame_index, mut sprite, obstacle) in &mut query {
+    for (mut timer, mut index, mut sprite, airborne_state) in &mut query {
         timer.0.tick(time.delta());
         if timer.0.just_finished() {
-            let frames = if obstacle.airborne {
+            let frames = if airborne_state.0 {
                 &air_frames.frames
             } else {
                 &ground_frames.frames
             };
-            frame_index.0 = (frame_index.0 + 1) % frames.len();
-            sprite.image = frames[frame_index.0].clone();
+            index.0 = (index.0 + 1) % frames.len();
+            sprite.image = frames[index.0].clone();
+        }
+    }
+}
+
+fn check_collision(
+    mut next: ResMut<NextState<GameState>>,
+    audio: Res<Audio>,
+    handles: Res<AudioHandles>,
+    player_query: Query<&Transform, With<Player>>,
+    obstacle_query: Query<&Transform, With<Obstacle>>,
+) {
+    if let Ok(player) = player_query.single() {
+        for obstacle in obstacle_query.iter() {
+            if player.translation.distance(obstacle.translation) < 50.0 {
+                audio.play(handles.game_over.clone());
+                next.set(GameState::GameOver);
+            }
         }
     }
 }
 
 // ===================================
-// ===         FUNCIÓN MAIN         ===
+// ===        MAIN APP             ===
 // ===================================
 fn main() {
     App::new()
@@ -360,13 +389,7 @@ fn main() {
         .init_resource::<AudioHandles>()
         .init_resource::<Score>()
         .init_state::<GameState>()
-        .add_systems(OnEnter(GameState::Menu), setup)
-        .add_systems(Update, start_game.run_if(in_state(GameState::Menu)))
-        .add_systems(Update, move_player.run_if(in_state(GameState::Playing)))
-        .add_systems(Update, move_obstacles.run_if(in_state(GameState::Playing)))
-        .add_systems(Update, check_collision.run_if(in_state(GameState::Playing)))
-        .add_systems(Update, update_score.run_if(in_state(GameState::Playing)))
-        .add_systems(Update, animate_player_frames.run_if(in_state(GameState::Playing)))
-        .add_systems(Update, animate_obstacle_frames.run_if(in_state(GameState::Playing)))
+        .add_plugins(PlayerPlugin)
+        .add_plugins(ObstaclePlugin)
         .run();
 }
